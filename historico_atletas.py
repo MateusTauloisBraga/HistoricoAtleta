@@ -1,6 +1,7 @@
 import io
 import json
 import os
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import BinaryIO
@@ -27,7 +28,16 @@ load_dotenv()
 # Grava na mesma pasta do projeto (ao lado de `app.py`).
 RESULTS_PATH = Path(__file__).resolve().parent / "results.xlsx"
 RESULTS_LOCK_PATH = RESULTS_PATH.with_suffix(".xlsx.lock")
-RESULTS_COLUMNS = ["Criado em", "Sexo", "Prova", "Distância", "Tempo", "Altimetria", "Entrada"]
+RESULTS_COLUMNS = [
+    "Criado em",
+    "ID Sessão",
+    "Sexo",
+    "Prova",
+    "Distância",
+    "Tempo",
+    "Altimetria",
+    "Entrada",
+]
 
 DEFAULT_SCHEMA_NAME = "trail_runner_experience"
 GENDER_OPTIONS = ["Detectar automaticamente", "M", "F", "Prefiro não informar"]
@@ -379,16 +389,24 @@ def enrich_rows_with_web(rows: list[dict], contexto_atleta: str = "") -> list[di
     return enriched
 
 
-def save_results(rows: list[dict], sexo: str, input_text: str) -> Path:
+def save_results(
+    rows: list[dict],
+    sexo: str,
+    input_text: str,
+    *,
+    session_id: str,
+) -> Path:
     if pd is None:
         raise RuntimeError("Pacote `pandas` não está instalado.")
 
     created_at = datetime.now().isoformat(timespec="seconds")
+    sid = (session_id or "").strip() or str(uuid.uuid4())
     data = []
     for row in _normalize_rows(rows):
         data.append(
             {
                 "Criado em": created_at,
+                "ID Sessão": sid,
                 "Sexo": sexo or "Prefiro não informar",
                 "Prova": row["Prova"],
                 "Distância": row["Distância"],
@@ -402,6 +420,10 @@ def save_results(rows: list[dict], sexo: str, input_text: str) -> Path:
     with FileLock(str(RESULTS_LOCK_PATH)):
         if RESULTS_PATH.exists():
             existing_df = pd.read_excel(RESULTS_PATH)
+            for col in RESULTS_COLUMNS:
+                if col not in existing_df.columns:
+                    existing_df[col] = pd.NA
+            existing_df = existing_df.reindex(columns=RESULTS_COLUMNS)
             out_df = pd.concat([existing_df, new_df], ignore_index=True)
         else:
             out_df = new_df
@@ -568,6 +590,9 @@ def render_page() -> None:
     ):
         st.session_state.setdefault(key, default)
 
+    st.session_state.setdefault("atleta_session_id", str(uuid.uuid4()))
+    _sid = st.session_state["atleta_session_id"]
+
     api_ok = bool(os.getenv("OPENAI_API_KEY", "").strip())
     st.markdown(
         f"""
@@ -575,6 +600,7 @@ def render_page() -> None:
   <h1>Histórico de Atletas</h1>
   <p>Transcreve o áudio, corrige nomes de franquias, busca distância e D+ na web e grava em <b>results.xlsx</b>.</p>
   <div class="bp-badges">
+    <span class="bp-badge">ID sessão: {_sid[:8]}…</span>
     <span class="bp-badge">{"API configurada" if api_ok else "Falta OPENAI_API_KEY"}</span>
     <span class="bp-badge">Whisper + modelo</span>
     <span class="bp-badge">Busca de elevação</span>
@@ -583,6 +609,7 @@ def render_page() -> None:
         """,
         unsafe_allow_html=True,
     )
+    st.caption(f"Identificador completo (gravado no Excel): `{_sid}`")
 
     col_in, col_out = st.columns([1, 1.05], gap="large")
 
@@ -673,6 +700,7 @@ def render_page() -> None:
                         rows,
                         sexo=structured_data.get("sexo", "Prefiro não informar"),
                         input_text=result.get("input_text", ""),
+                        session_id=st.session_state.get("atleta_session_id", ""),
                     )
             except Exception as exc:
                 st.error(f"Não deu certo: {exc}")
