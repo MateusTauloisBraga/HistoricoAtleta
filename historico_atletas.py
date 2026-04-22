@@ -96,6 +96,78 @@ def get_openai_client() -> OpenAI:
     return OpenAI(api_key=api_key)
 
 
+def get_admin_password() -> str:
+    """Senha de acesso à área interna: Streamlit Cloud (secrets) ou .env / env."""
+    s = ""
+    if st is not None:
+        try:
+            s = str(st.secrets.get("ADMIN_PASSWORD", "")).strip()
+        except Exception:
+            s = ""
+    if not s:
+        s = os.getenv("ADMIN_PASSWORD", "").strip()
+    return s
+
+
+def render_admin_data_view() -> None:
+    """Tela interna: visualizar e baixar `results.xlsx` (não listada no menu)."""
+    if st is None:
+        raise RuntimeError("Pacote `streamlit` não está instalado.")
+    if pd is None:
+        st.error("Instale `pandas` para carregar a planilha.")
+        return
+
+    _ui_css()
+    st.markdown(
+        """
+<div class="bp-hero">
+  <h1>Base de resultados</h1>
+  <p>Download e visualização do ficheiro <b>results.xlsx</b> (dados submetidos pelo fluxo de atletas).</p>
+</div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    c1, c2 = st.columns([1, 1])
+    with c1:
+        st.caption(f"Caminho no servidor: `{RESULTS_PATH}`")
+    with c2:
+        if st.button("Sair desta área", type="secondary"):
+            st.session_state["admin_unlocked"] = False
+            try:
+                st.rerun()
+            except Exception:
+                if hasattr(st, "experimental_rerun"):
+                    st.experimental_rerun()
+
+    if not RESULTS_PATH.is_file():
+        st.warning("Ainda não existe `results.xlsx` — ninguém gravou dados neste ambiente, ou o disco foi reiniciado (comum no Streamlit Cloud).")
+        return
+
+    try:
+        df = pd.read_excel(RESULTS_PATH)
+    except Exception as e:
+        st.error(f"Não foi possível ler a planilha: {e}")
+        return
+
+    st.subheader("Pré-visualização")
+    st.dataframe(df, use_container_width=True, height=400)
+
+    try:
+        file_bytes = RESULTS_PATH.read_bytes()
+    except Exception as e:
+        st.error(f"Não foi possível ler o ficheiro para download: {e}")
+        return
+
+    st.download_button(
+        label="Descarregar results.xlsx",
+        data=file_bytes,
+        file_name="results.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        type="primary",
+    )
+
+
 def openai_model() -> str:
     return os.getenv("OPENAI_MODEL", "gpt-4.1-mini").strip() or "gpt-4.1-mini"
 
@@ -473,7 +545,17 @@ def render_page() -> None:
     if st is None:
         raise RuntimeError("Pacote `streamlit` não está instalado.")
 
-    st.set_page_config(page_title="Histórico de Atletas", page_icon="⛰️", layout="wide")
+    st.session_state.setdefault("admin_unlocked", False)
+    _admin = bool(st.session_state.get("admin_unlocked"))
+    st.set_page_config(
+        page_title="Base de resultados" if _admin else "Histórico de Atletas",
+        page_icon="🔐" if _admin else "⛰️",
+        layout="wide",
+    )
+    if _admin:
+        render_admin_data_view()
+        return
+
     _ui_css()
 
     for key, default in (
@@ -550,6 +632,27 @@ def render_page() -> None:
         except TypeError:
             run = st.button("Extrair e salvar no Excel", type="primary", disabled=not has_input)
         st.caption("Cada clique anexa uma ou mais linhas em `results.xlsx` (sem sobrescrever o histórico).")
+
+        with st.expander("Acesso interno — base de resultados", expanded=False):
+            st.caption(
+                "Não aparece no menu lateral. Defina `ADMIN_PASSWORD` no ambiente ou em **Secrets** (Streamlit Cloud)."
+            )
+            st.text_input("Senha", type="password", key="admin_password_input")
+            go = st.button("Entrar na área de dados", type="secondary")
+            if go:
+                cfg = get_admin_password()
+                typed = (st.session_state.get("admin_password_input") or "").strip()
+                if not cfg:
+                    st.error("Senha de admin não configurada. Defina `ADMIN_PASSWORD`.")
+                elif typed == cfg:
+                    st.session_state["admin_unlocked"] = True
+                    try:
+                        st.rerun()
+                    except Exception:
+                        if hasattr(st, "experimental_rerun"):
+                            st.experimental_rerun()
+                else:
+                    st.error("Senha incorreta.")
 
     with col_out:
         if run and has_input:
